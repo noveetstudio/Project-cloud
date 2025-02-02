@@ -1,0 +1,41 @@
+#include <Adafruit_NeoPixel.h>
+
+#define LED_PIN 5
+#define NUM_LEDS 5
+
+Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// Updated base color: a more vivid yellow/orange
+const uint8_t baseR = 255;
+const uint8_t baseG = 165;
+const uint8_t baseB = 0;
+
+unsigned long lastUpdate = 0;
+const unsigned long updateInterval = 50; // Update every 50ms
+
+void setup() {
+  strip.begin();
+  strip.show(); // Initialize all pixels to off
+  randomSeed(analogRead(0));
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastUpdate >= updateInterval) {
+    lastUpdate = currentMillis;
+    
+    // Create a slight flicker effect with brightness variation between 85% and 100%
+    float brightness = random(85, 101) / 100.0;
+    
+    // Scale the base color by the brightness factor
+    uint8_t r = (uint8_t)(baseR * brightness);
+    uint8_t g = (uint8_t)(baseG * brightness);
+    uint8_t b = (uint8_t)(baseB * brightness);
+    
+    // Set all pixels to the computed warm yellow/orange color
+    for (int i = 0; i < NUM_LEDS; i++) {
+      strip.setPixelColor(i, strip.Color(r, g, b));
+    }
+    strip.show();
+  }
+}
