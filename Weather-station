@@ -1,0 +1,200 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Adafruit_NeoPixel.h>
+
+// ---- WiFi & Weather API Settings ----
+const char* ssid     = "YOUR_SSID";
+const char* password = "YOUR_PASSWORD";
+const char* weatherApiKey = "YOUR_OPENWEATHERMAP_API_KEY";
+const char* city = "YOUR_CITY";  // e.g., "London"
+const char* countryCode = "YOUR_COUNTRY_CODE"; // e.g., "uk"
+// Update interval (milliseconds) - for example, every 10 minutes:
+const unsigned long updateInterval = 10 * 60 * 1000;
+
+// ---- NeoPixel Setup ----
+// Sun strip: 4 LEDs on pin 5
+#define SUN_PIN 5
+#define NUM_SUN_LEDS 4
+Adafruit_NeoPixel sunStrip(NUM_SUN_LEDS, SUN_PIN, NEO_GRB + NEO_KHZ800);
+
+// Cloud strip: 5 LEDs on pin 6
+#define CLOUD_PIN 6
+#define NUM_CLOUD_LEDS 5
+Adafruit_NeoPixel cloudStrip(NUM_CLOUD_LEDS, CLOUD_PIN, NEO_GRB + NEO_KHZ800);
+
+// ---- Timing variables ----
+unsigned long lastUpdate = 0;
+
+// ---- Forward Declarations ----
+void updateWeather();
+void showSunny();
+void showCloudy();
+void showLightningCloud();
+void clearLEDs();
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  // Start WiFi connection
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println(" connected.");
+
+  // Initialize LED strips
+  sunStrip.begin();
+  cloudStrip.begin();
+  sunStrip.show();
+  cloudStrip.show();
+
+  // Do an initial weather update
+  updateWeather();
+  lastUpdate = millis();
+}
+
+void loop() {
+  // Update weather periodically
+  if (millis() - lastUpdate > updateInterval) {
+    updateWeather();
+    lastUpdate = millis();
+  }
+  
+  // Nothing else in the loop; weather update routines handle the LED updates.
+  delay(1000);
+}
+
+// ---- Weather Update Function ----
+void updateWeather() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    // Build API URL (units=metric; change as needed)
+    String url = "http://api.openweathermap.org/data/2.5/weather?q=";
+    url += city;
+    url += ",";
+    url += countryCode;
+    url += "&appid=";
+    url += weatherApiKey;
+    url += "&units=metric";
+    
+    Serial.println("Requesting weather data from:");
+    Serial.println(url);
+
+    http.begin(url);
+    int httpCode = http.GET();
+    if (httpCode > 0) { // Connection successful
+      if (httpCode == HTTP_CODE_OK) {
+        String payload = http.getString();
+        Serial.println("Weather payload:");
+        Serial.println(payload);
+        
+        // Use ArduinoJson to parse (adjust buffer size as needed)
+        const size_t capacity = JSON_ARRAY_SIZE(1) + JSON_OBJECT_SIZE(3) + 2*JSON_OBJECT_SIZE(5) + 400;
+        DynamicJsonDocument doc(capacity);
+        DeserializationError error = deserializeJson(doc, payload);
+        if (!error) {
+          // Access the first weather condition
+          const char* condition = doc["weather"][0]["main"];
+          Serial.print("Condition: ");
+          Serial.println(condition);
+          
+          // Clear all LEDs before updating
+          clearLEDs();
+          
+          // Decision making based on condition
+          String cond = String(condition);
+          cond.toLowerCase();
+
+          if (cond == "clear") {
+            // Sunny: show sun strip only
+            showSunny();
+          }
+          else if (cond == "clouds") {
+            // Cloudy: show cloud strip only
+            showCloudy();
+          }
+          else if (cond == "rain" || cond == "thunderstorm" || cond == "snow" || cond == "drizzle" ||
+                   cond == "hail" || cond == "bizzard") {
+            // For rainy/snow/thunder conditions: show lightning effect on clouds
+            showLightningCloud();
+          }
+          else if (cond.indexOf("clear") >= 0 && cond.indexOf("cloud") >= 0) {
+            // If weather contains both clear and cloudy, show both
+            showSunny();
+            showCloudy();
+          }
+          else {
+            // Default: light the cloud strip with a soft neutral color
+            showCloudy();
+          }
+        } else {
+          Serial.print("deserializeJson() failed: ");
+          Serial.println(error.f_str());
+        }
+      }
+    } else {
+      Serial.print("Error in HTTP request: ");
+      Serial.println(http.errorToString(httpCode));
+    }
+    http.end();
+  }
+}
+
+// ---- LED Functions ----
+
+// Turn on sun strip with a warm yellow/orange
+void showSunny() {
+  uint32_t color = sunStrip.Color(255, 200, 50); // Warm yellow
+  for (int i = 0; i < NUM_SUN_LEDS; i++) {
+    sunStrip.setPixelColor(i, color);
+  }
+  sunStrip.show();
+}
+
+// Turn on cloud strip with a soft gray
+void showCloudy() {
+  uint32_t color = cloudStrip.Color(150, 150, 150); // Soft gray
+  for (int i = 0; i < NUM_CLOUD_LEDS; i++) {
+    cloudStrip.setPixelColor(i, color);
+  }
+  cloudStrip.show();
+}
+
+// Lightning effect on cloud strip for severe conditions
+void showLightningCloud() {
+  // Lightning effect: flash bright white several times
+  const int flashes = 3;
+  for (int i = 0; i < flashes; i++) {
+    for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
+      cloudStrip.setPixelColor(j, cloudStrip.Color(255, 255, 255));
+    }
+    cloudStrip.show();
+    delay(random(50, 150));
+    
+    // Off between flashes
+    for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
+      cloudStrip.setPixelColor(j, cloudStrip.Color(0, 0, 0));
+    }
+    cloudStrip.show();
+    delay(random(50, 150));
+  }
+  
+  // Optionally, leave the cloud strip lit with a subdued gray after the effect
+  showCloudy();
+}
+
+// Clear both LED strips
+void clearLEDs() {
+  for (int i = 0; i < NUM_SUN_LEDS; i++) {
+    sunStrip.setPixelColor(i, 0);
+  }
+  sunStrip.show();
+  for (int i = 0; i < NUM_CLOUD_LEDS; i++) {
+    cloudStrip.setPixelColor(i, 0);
+  }
+  cloudStrip.show();
+}
