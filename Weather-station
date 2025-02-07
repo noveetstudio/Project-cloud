@@ -7,24 +7,34 @@
 const char* ssid            = "YOUR_SSID";
 const char* password        = "YOUR_PASSWORD";
 const char* weatherApiKey   = "YOUR_OPENWEATHERMAP_API_KEY";
-const char* city            = "YOUR_CITY";         // e.g., "London"
-const char* countryCode     = "YOUR_COUNTRY_CODE"; // e.g., "uk"
+const char* city            = "YOUR_CITY";         // e.g., "Vienna"
+const char* countryCode     = "YOUR_COUNTRY_CODE"; // e.g., "at"
 const unsigned long updateInterval = 10 * 60 * 1000; // Update every 10 minutes
 
 // ---- NeoPixel Setup ----
 // Sun strip: 4 LEDs on pin 5
-#define SUN_PIN     5
+#define SUN_PIN      5
 #define NUM_SUN_LEDS 4
 Adafruit_NeoPixel sunStrip(NUM_SUN_LEDS, SUN_PIN, NEO_GRB + NEO_KHZ800);
 
 // Cloud strip: 5 LEDs on pin 6
-#define CLOUD_PIN     6
+#define CLOUD_PIN      6
 #define NUM_CLOUD_LEDS 5
 Adafruit_NeoPixel cloudStrip(NUM_CLOUD_LEDS, CLOUD_PIN, NEO_GRB + NEO_KHZ800);
 
 // ---- Global Variables ----
 unsigned long lastUpdate = 0;
-String lastCondition = ""; // Stores the last received weather condition
+unsigned long lastThunder = 0; // Used only when in "thunder" state
+String currentState = "";      // Can be: "clear", "clear+cloud", "cloud", "thunder"
+
+// ---- Forward Declarations ----
+void updateWeather();
+void updateLEDs();
+void ensureWiFiConnected();
+void clearLEDs();
+void showSunny();            // Flickering sun effect (4 LEDs)
+void showCloudy();           // Steady cloud effect (5 LEDs)
+void showLightningCloud();   // Thunder effect (lightning flashes on cloud strip)
 
 void setup() {
   Serial.begin(115200);
@@ -41,35 +51,66 @@ void setup() {
 
   // Initialize LED strips
   sunStrip.begin();
-  sunStrip.show();   // Ensure all sun LEDs are off
+  sunStrip.show();   // All sun LEDs off
   cloudStrip.begin();
-  cloudStrip.show(); // Ensure all cloud LEDs are off
+  cloudStrip.show(); // All cloud LEDs off
 
   // Do an initial weather update
   updateWeather();
   lastUpdate = millis();
+  lastThunder = millis();
 }
 
 void loop() {
-  // Check WiFi connection periodically and reconnect if lost
   ensureWiFiConnected();
 
-  // Update weather data only after the update interval
+  // Update weather periodically
   if (millis() - lastUpdate >= updateInterval) {
     updateWeather();
     lastUpdate = millis();
   }
-  delay(1000); // Small delay to avoid hogging the loop
+  
+  // Refresh LED display based on the current state
+  updateLEDs();
+
+  delay(1000); // Loop delay (adjust as needed)
 }
 
-// ---- Function to ensure WiFi remains connected ----
+// ---- LED Display Refresh ----
+void updateLEDs() {
+  if (currentState == "clear") {
+    // Sunny: continuously refresh sun flicker effect
+    showSunny();
+  }
+  else if (currentState == "clear+cloud") {
+    // Both strips: refresh sun and cloud display
+    showSunny();
+    showCloudy();
+  }
+  else if (currentState == "cloud") {
+    // Cloudy: steady cloud display
+    showCloudy();
+  }
+  else if (currentState == "thunder") {
+    // Thunder: every 30 seconds trigger lightning effect; otherwise, maintain cloud display
+    if (millis() - lastThunder >= 30000) {
+      Serial.println("Triggering thunder effect.");
+      showLightningCloud();
+      lastThunder = millis();
+    }
+    else {
+      showCloudy();
+    }
+  }
+}
+
+// ---- WiFi Reconnection ----
 void ensureWiFiConnected() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi lost. Attempting to reconnect...");
     WiFi.disconnect();
     WiFi.begin(ssid, password);
     unsigned long startAttemptTime = millis();
-    // Attempt reconnect for 10 seconds
     while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
       delay(500);
       Serial.print(".");
@@ -83,69 +124,70 @@ void ensureWiFiConnected() {
   }
 }
 
-// ---- Function to update weather and control LEDs ----
+// ---- Weather Update Function ----
 void updateWeather() {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     String url = "http://api.openweathermap.org/data/2.5/weather?q=" 
-                + String(city) + "," + String(countryCode)
-                + "&appid=" + String(weatherApiKey) 
-                + "&units=metric";
+                 + String(city) + "," + String(countryCode)
+                 + "&appid=" + String(weatherApiKey)
+                 + "&units=metric";
     Serial.println("Requesting weather data from:");
     Serial.println(url);
 
     http.begin(url);
     int httpCode = http.GET();
-    if (httpCode > 0) { // Successful connection?
-      if (httpCode == HTTP_CODE_OK) {
-        String payload = http.getString();
-        Serial.println("Received payload:");
-        Serial.println(payload);
+    if (httpCode > 0 && httpCode == HTTP_CODE_OK) {
+      String payload = http.getString();
+      Serial.println("Received payload:");
+      Serial.println(payload);
 
-        DynamicJsonDocument doc(1024);
-        DeserializationError error = deserializeJson(doc, payload);
-        if (!error) {
-          const char* condition = doc["weather"][0]["main"];
-          String newCondition = String(condition);
-          newCondition.toLowerCase();
-          Serial.print("Weather condition: ");
-          Serial.println(newCondition);
+      DynamicJsonDocument doc(2048);
+      DeserializationError error = deserializeJson(doc, payload);
+      if (!error) {
+        // Use the "description" field from the weather array
+        const char* descCond = doc["weather"][0]["description"];
+        String descStr = String(descCond);
+        descStr.toLowerCase();
+        Serial.print("Weather description: ");
+        Serial.println(descStr);
 
-          // Only update LEDs if the condition has changed
-          if (newCondition != lastCondition) {
-            lastCondition = newCondition;
-            clearLEDs();
-
-            // Determine LED behavior based on the weather condition:
-            if (newCondition == "clear") {
-              showSunny();
-            }
-            else if (newCondition == "clouds") {
-              showCloudy();
-            }
-            else if (newCondition == "rain" || newCondition == "thunderstorm" ||
-                     newCondition == "snow" || newCondition == "drizzle" ||
-                     newCondition == "hail" || newCondition == "bizzard") {
-              showLightningCloud();
-            }
-            else if (newCondition.indexOf("clear") >= 0 && newCondition.indexOf("cloud") >= 0) {
-              // If both sunny and cloudy are indicated
-              showSunny();
-              showCloudy();
-            }
-            else {
-              // Fallback for any other conditions: light cloud strip with a neutral tone
-              showCloudy();
-            }
-          }
-          else {
-            Serial.println("Weather condition unchanged. No LED update.");
+        String newState = "";
+        if (descStr == "clear sky") {
+          newState = "clear";
+        }
+        else if (descStr == "few clouds" || descStr == "scattered clouds") {
+          newState = "clear+cloud";
+        }
+        else if (descStr == "broken clouds" || descStr == "overcast clouds" ||
+                 descStr == "mist" || descStr == "haze" || descStr == "fog") {
+          newState = "cloud";
+        }
+        else {
+          newState = "thunder";
+        }
+        
+        Serial.print("New state: ");
+        Serial.println(newState);
+        
+        if (newState != currentState) {
+          Serial.println("Weather state changed, updating LED display.");
+          currentState = newState;
+          clearLEDs();
+          // Immediately set display upon update
+          updateLEDs();
+          // Reset thunder timer if needed
+          if (currentState == "thunder") {
+            lastThunder = millis();
           }
         }
         else {
-          Serial.print("JSON Parsing failed: ");
-          Serial.println(error.f_str());
+          Serial.println("Weather state unchanged.");
         }
+      }
+      else {
+        Serial.print("JSON Parsing failed: ");
+        Serial.println(error.f_str());
       }
     }
     else {
@@ -158,53 +200,54 @@ void updateWeather() {
 
 // ---- LED Control Functions ----
 
-// Show sunny: light the sun strip with warm yellow
+// Sunny: Flickering warm sun effect on 4 LEDs (color: 255,165,0)
 void showSunny() {
-  uint32_t color = sunStrip.Color(255, 200, 50); // Warm yellow
+  float brightness = random(85, 101) / 100.0; // Random brightness between 0.85 and 1.0
+  uint8_t r = (uint8_t)(255 * brightness);
+  uint8_t g = (uint8_t)(165 * brightness);
+  uint8_t b = 0;  // Always 0 for blue
   for (int i = 0; i < NUM_SUN_LEDS; i++) {
-    sunStrip.setPixelColor(i, color);
+    sunStrip.setPixelColor(i, sunStrip.Color(r, g, b));
   }
   sunStrip.show();
 }
 
-// Show cloudy: light the cloud strip with soft gray
+// Cloudy: Steady soft gray on 5 LEDs
 void showCloudy() {
-  uint32_t color = cloudStrip.Color(150, 150, 150); // Soft gray
+  uint32_t color = cloudStrip.Color(150, 150, 150);
   for (int i = 0; i < NUM_CLOUD_LEDS; i++) {
     cloudStrip.setPixelColor(i, color);
   }
   cloudStrip.show();
 }
 
-// Show lightning effect on cloud strip (for rain, thunder, snow, etc.)
+// Thunder/Lightning effect on cloud strip: flashes white several times then reverts to soft gray
 void showLightningCloud() {
   const int flashes = 3;
   for (int i = 0; i < flashes; i++) {
-    // Flash all cloud LEDs bright white
+    // Flash all cloud LEDs white
     for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
       cloudStrip.setPixelColor(j, cloudStrip.Color(255, 255, 255));
     }
     cloudStrip.show();
     delay(random(50, 150));
-
-    // Turn off cloud LEDs
+    // Turn off cloud LEDs briefly
     for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
       cloudStrip.setPixelColor(j, 0);
     }
     cloudStrip.show();
     delay(random(50, 150));
   }
-  // After flashing, leave them with a subdued cloudy color
+  // Revert back to soft gray on cloud strip after thunder effect
   showCloudy();
 }
 
-// Clear both LED strips
+// ---- Clear Both LED Strips ----
 void clearLEDs() {
   for (int i = 0; i < NUM_SUN_LEDS; i++) {
     sunStrip.setPixelColor(i, 0);
   }
   sunStrip.show();
-
   for (int i = 0; i < NUM_CLOUD_LEDS; i++) {
     cloudStrip.setPixelColor(i, 0);
   }
