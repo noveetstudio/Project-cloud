@@ -12,15 +12,18 @@ const char* countryCode     = "YOUR_COUNTRY_CODE"; // e.g., "at"
 const unsigned long updateInterval = 10 * 60 * 1000; // Update every 10 minutes
 
 // ---- NeoPixel Setup ----
-// Sun strip: 4 LEDs on pin 5
 #define SUN_PIN      5
 #define NUM_SUN_LEDS 4
 Adafruit_NeoPixel sunStrip(NUM_SUN_LEDS, SUN_PIN, NEO_GRB + NEO_KHZ800);
 
-// Cloud strip: 5 LEDs on pin 6
 #define CLOUD_PIN      6
 #define NUM_CLOUD_LEDS 5
 Adafruit_NeoPixel cloudStrip(NUM_CLOUD_LEDS, CLOUD_PIN, NEO_GRB + NEO_KHZ800);
+
+// ---- TTP223 Touch Sensor Setup ----
+#define TOUCH_PIN    9  // GPIO pin connected to TTP223 IO
+bool ledsEnabled = true; // Toggle to turn LEDs on/off
+bool lastTouchState = LOW; // Store the last touch state for debouncing
 
 // ---- Global Variables ----
 unsigned long lastUpdate = 0;
@@ -55,6 +58,9 @@ void setup() {
   cloudStrip.begin();
   cloudStrip.show(); // All cloud LEDs off
 
+  // Initialize TTP223 touch sensor
+  pinMode(TOUCH_PIN, INPUT);
+
   // Do an initial weather update
   updateWeather();
   lastUpdate = millis();
@@ -69,32 +75,42 @@ void loop() {
     updateWeather();
     lastUpdate = millis();
   }
-  
-  // Refresh LED display based on the current state
-  updateLEDs();
 
-  delay(1000); // Loop delay (adjust as needed)
+  // Check TTP223 touch sensor
+  bool touchState = digitalRead(TOUCH_PIN);
+  if (touchState == HIGH && lastTouchState == LOW) {
+    // Toggle LED state on touch
+    ledsEnabled = !ledsEnabled;
+    Serial.println(ledsEnabled ? "LEDs ON" : "LEDs OFF");
+    if (!ledsEnabled) {
+      clearLEDs(); // Turn off all LEDs if disabled
+    }
+    delay(500); // Debounce delay
+  }
+  lastTouchState = touchState;
+
+  // Refresh LED display based on the current state (if LEDs are enabled)
+  if (ledsEnabled) {
+    updateLEDs();
+  }
+
+  delay(100); // Loop delay (adjust as needed)
 }
 
 // ---- LED Display Refresh ----
 void updateLEDs() {
   if (currentState == "clear") {
-    // Sunny: continuously refresh sun flicker effect
     showSunny();
   }
   else if (currentState == "clear+cloud") {
-    // Both strips: refresh sun and cloud display
     showSunny();
     showCloudy();
   }
   else if (currentState == "cloud") {
-    // Cloudy: steady cloud display
     showCloudy();
   }
   else if (currentState == "thunder") {
-    // Thunder: every 30 seconds trigger lightning effect; otherwise, maintain cloud display
     if (millis() - lastThunder >= 30000) {
-      Serial.println("Triggering thunder effect.");
       showLightningCloud();
       lastThunder = millis();
     }
@@ -145,7 +161,6 @@ void updateWeather() {
       DynamicJsonDocument doc(2048);
       DeserializationError error = deserializeJson(doc, payload);
       if (!error) {
-        // Use the "description" field from the weather array
         const char* descCond = doc["weather"][0]["description"];
         String descStr = String(descCond);
         descStr.toLowerCase();
@@ -174,9 +189,7 @@ void updateWeather() {
           Serial.println("Weather state changed, updating LED display.");
           currentState = newState;
           clearLEDs();
-          // Immediately set display upon update
           updateLEDs();
-          // Reset thunder timer if needed
           if (currentState == "thunder") {
             lastThunder = millis();
           }
@@ -199,20 +212,17 @@ void updateWeather() {
 }
 
 // ---- LED Control Functions ----
-
-// Sunny: Flickering warm sun effect on 4 LEDs (color: 255,165,0)
 void showSunny() {
-  float brightness = random(85, 101) / 100.0; // Random brightness between 0.85 and 1.0
+  float brightness = random(85, 101) / 100.0;
   uint8_t r = (uint8_t)(255 * brightness);
   uint8_t g = (uint8_t)(165 * brightness);
-  uint8_t b = 0;  // Always 0 for blue
+  uint8_t b = 0;
   for (int i = 0; i < NUM_SUN_LEDS; i++) {
     sunStrip.setPixelColor(i, sunStrip.Color(r, g, b));
   }
   sunStrip.show();
 }
 
-// Cloudy: Steady soft gray on 5 LEDs
 void showCloudy() {
   uint32_t color = cloudStrip.Color(150, 150, 150);
   for (int i = 0; i < NUM_CLOUD_LEDS; i++) {
@@ -221,28 +231,23 @@ void showCloudy() {
   cloudStrip.show();
 }
 
-// Thunder/Lightning effect on cloud strip: flashes white several times then reverts to soft gray
 void showLightningCloud() {
   const int flashes = 3;
   for (int i = 0; i < flashes; i++) {
-    // Flash all cloud LEDs white
     for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
       cloudStrip.setPixelColor(j, cloudStrip.Color(255, 255, 255));
     }
     cloudStrip.show();
     delay(random(50, 150));
-    // Turn off cloud LEDs briefly
     for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
       cloudStrip.setPixelColor(j, 0);
     }
     cloudStrip.show();
     delay(random(50, 150));
   }
-  // Revert back to soft gray on cloud strip after thunder effect
   showCloudy();
 }
 
-// ---- Clear Both LED Strips ----
 void clearLEDs() {
   for (int i = 0; i < NUM_SUN_LEDS; i++) {
     sunStrip.setPixelColor(i, 0);
