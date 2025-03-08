@@ -2,102 +2,165 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Adafruit_NeoPixel.h>
+#include <WiFiManager.h>
 
-// ---- WiFi & Weather API Settings ----
-const char* ssid            = "YOUR_SSID";
-const char* password        = "YOUR_PASSWORD";
-const char* weatherApiKey   = "YOUR_OPENWEATHERMAP_API_KEY";
-const char* city            = "YOUR_CITY";         // e.g., "Vienna"
-const char* countryCode     = "YOUR_COUNTRY_CODE"; // e.g., "at"
-const unsigned long updateInterval = 10 * 60 * 1000; // Update every 10 minutes
-
-// ---- NeoPixel Setup ----
-#define SUN_PIN      5
+#define SUN_PIN      2  // Changed to GPIO 2 (A2)
 #define NUM_SUN_LEDS 4
 Adafruit_NeoPixel sunStrip(NUM_SUN_LEDS, SUN_PIN, NEO_GRB + NEO_KHZ800);
 
-#define CLOUD_PIN      6
+#define CLOUD_PIN      4  // Changed to GPIO 4 (A4)
 #define NUM_CLOUD_LEDS 5
 Adafruit_NeoPixel cloudStrip(NUM_CLOUD_LEDS, CLOUD_PIN, NEO_GRB + NEO_KHZ800);
 
-// ---- TTP223 Touch Sensor Setup ----
-#define TOUCH_PIN    9  // GPIO pin connected to TTP223 IO
-bool ledsEnabled = true; // Toggle to turn LEDs on/off
-bool lastTouchState = LOW; // Store the last touch state for debouncing
+#define TOUCH_PIN    3  // GPIO 3 (A3)
+bool ledsEnabled = true;
+bool lastTouchState = LOW;
+unsigned long touchStartTime = 0;
+bool touchTimingStarted = false;
+unsigned long startupTime = 0;
 
-// ---- Global Variables ----
 unsigned long lastUpdate = 0;
-unsigned long lastThunder = 0; // Used only when in "thunder" state
-String currentState = "";      // Can be: "clear", "clear+cloud", "cloud", "thunder"
+unsigned long lastThunder = 0;
+String currentState = "";
+String lastKnownState = "clear";
+bool isManualOverride = false;
+bool isInitialized = false;
+const unsigned long updateInterval = 10 * 60 * 1000;
 
-// ---- Forward Declarations ----
+WiFiManagerParameter custom_api_key("api", "Weather API Key", "2daec8d0525b0e600598bb69cfdec452", 40);
+WiFiManagerParameter custom_city("city", "City", "Seville", 20);
+WiFiManagerParameter custom_country("country", "Country Code", "ES", 3);
+String weatherApiKey;
+String city;
+String countryCode;
+
 void updateWeather();
 void updateLEDs();
 void ensureWiFiConnected();
 void clearLEDs();
-void showSunny();            // Flickering sun effect (4 LEDs)
-void showCloudy();           // Steady cloud effect (5 LEDs)
-void showLightningCloud();   // Thunder effect (lightning flashes on cloud strip)
+void showSunny();
+void showCloudy();
+void showLightningCloud();
+void indicateMode();
+void indicateWiFiStatus(bool connected);
 
 void setup() {
-  Serial.begin(115200);
-  delay(1000);
-
-  // Start WiFi
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println(" connected.");
-
-  // Initialize LED strips
-  sunStrip.begin();
-  sunStrip.show();   // All sun LEDs off
-  cloudStrip.begin();
-  cloudStrip.show(); // All cloud LEDs off
-
-  // Initialize TTP223 touch sensor
   pinMode(TOUCH_PIN, INPUT);
 
-  // Do an initial weather update
-  updateWeather();
-  lastUpdate = millis();
-  lastThunder = millis();
+  sunStrip.begin();
+  cloudStrip.begin();
+
+  // Test both strips immediately
+  for (int i = 0; i < NUM_SUN_LEDS; i++) {
+    sunStrip.setPixelColor(i, sunStrip.Color(255, 165, 0)); // Orange
+  }
+  for (int i = 0; i < NUM_CLOUD_LEDS; i++) {
+    cloudStrip.setPixelColor(i, cloudStrip.Color(255, 165, 0)); // Orange
+  }
+  sunStrip.show();
+  cloudStrip.show();
+  delay(1000);
+  clearLEDs();
+
+  WiFi.mode(WIFI_STA);
+  WiFiManager wm;
+  wm.addParameter(&custom_api_key);
+  wm.addParameter(&custom_city);
+  wm.addParameter(&custom_country);
+
+  bool connected = wm.autoConnect("WeatherLED_AP", NULL); // Removed timeout parameter
+  indicateWiFiStatus(connected);
+
+  if (!connected) {
+    for (int i = 0; i < 5; i++) {
+      for (int j = 0; j < NUM_SUN_LEDS; j++) {
+        sunStrip.setPixelColor(j, sunStrip.Color(255, 165, 0)); // Orange
+      }
+      sunStrip.show();
+      delay(500);
+      clearLEDs();
+      delay(500);
+    }
+    while (true) {
+      delay(1000);
+    }
+  }
+
+  weatherApiKey = custom_api_key.getValue();
+  city = custom_city.getValue();
+  countryCode = custom_country.getValue();
+
+  delay(100);
+  lastTouchState = digitalRead(TOUCH_PIN);
+  startupTime = millis();
 }
 
 void loop() {
   ensureWiFiConnected();
 
-  // Update weather periodically
   if (millis() - lastUpdate >= updateInterval) {
     updateWeather();
     lastUpdate = millis();
   }
 
-  // Check TTP223 touch sensor
-  bool touchState = digitalRead(TOUCH_PIN);
-  if (touchState == HIGH && lastTouchState == LOW) {
-    // Toggle LED state on touch
-    ledsEnabled = !ledsEnabled;
-    Serial.println(ledsEnabled ? "LEDs ON" : "LEDs OFF");
-    if (!ledsEnabled) {
-      clearLEDs(); // Turn off all LEDs if disabled
+  if (millis() - startupTime > 10000) {
+    bool touchState = digitalRead(TOUCH_PIN);
+    if (touchState == HIGH && lastTouchState == LOW && !touchTimingStarted) {
+      touchStartTime = millis();
+      touchTimingStarted = true;
     }
-    delay(500); // Debounce delay
+    if (touchState == LOW && lastTouchState == HIGH) {
+      unsigned long touchDuration = millis() - touchStartTime;
+      if (touchDuration < 1000) {
+        ledsEnabled = !ledsEnabled;
+        if (!ledsEnabled) clearLEDs();
+      } else if (touchDuration < 3000) {
+        isManualOverride = true;
+        isInitialized = true;
+        if (currentState == "clear") currentState = "clear+cloud";
+        else if (currentState == "clear+cloud") currentState = "cloud";
+        else if (currentState == "cloud") currentState = "thunder";
+        else currentState = "clear";
+        lastKnownState = currentState;
+        clearLEDs();
+        indicateMode();
+      } else if (touchDuration < 5000) {
+        isManualOverride = false;
+        isInitialized = true;
+        updateWeather();
+        lastUpdate = millis();
+      } else if (touchDuration > 5000 && touchDuration < 6000) {
+        WiFiManager wm;
+        wm.resetSettings();
+        ESP.restart();
+      }
+      touchTimingStarted = false;
+    }
+    lastTouchState = touchState;
   }
-  lastTouchState = touchState;
 
-  // Refresh LED display based on the current state (if LEDs are enabled)
-  if (ledsEnabled) {
+  if (ledsEnabled && isInitialized) {
     updateLEDs();
   }
-
-  delay(100); // Loop delay (adjust as needed)
+  delay(100);
 }
 
-// ---- LED Display Refresh ----
+void indicateWiFiStatus(bool connected) {
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < NUM_SUN_LEDS; j++) {
+      if (connected) {
+        sunStrip.setPixelColor(j, sunStrip.Color(0, 255, 0)); // Green for success
+      } else {
+        sunStrip.setPixelColor(j, sunStrip.Color(255, 0, 0)); // Red for failure
+      }
+    }
+    sunStrip.show();
+    delay(500);
+    clearLEDs();
+    delay(500);
+  }
+}
+
 void updateLEDs() {
   if (currentState == "clear") {
     showSunny();
@@ -120,98 +183,104 @@ void updateLEDs() {
   }
 }
 
-// ---- WiFi Reconnection ----
+void indicateMode() {
+  if (isManualOverride) {
+    for (int i = 0; i < NUM_CLOUD_LEDS; i++) {
+      cloudStrip.setPixelColor(i, cloudStrip.Color(0, 0, 255));
+    }
+    cloudStrip.show();
+    delay(200);
+    clearLEDs();
+    delay(200);
+    for (int i = 0; i < NUM_CLOUD_LEDS; i++) {
+      cloudStrip.setPixelColor(i, cloudStrip.Color(0, 0, 255));
+    }
+    cloudStrip.show();
+    delay(200);
+    clearLEDs();
+  } else {
+    for (int i = 0; i < NUM_CLOUD_LEDS; i++) {
+      cloudStrip.setPixelColor(i, cloudStrip.Color(0, 255, 0));
+    }
+    cloudStrip.show();
+    delay(200);
+    clearLEDs();
+  }
+  delay(200);
+}
+
 void ensureWiFiConnected() {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi lost. Attempting to reconnect...");
     WiFi.disconnect();
-    WiFi.begin(ssid, password);
+    WiFi.reconnect();
     unsigned long startAttemptTime = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 15000) {
       delay(500);
-      Serial.print(".");
     }
-    Serial.println();
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("Reconnected to WiFi.");
+    if (WiFi.status() != WL_CONNECTED) {
+      indicateWiFiStatus(false);
+      ESP.restart();
     } else {
-      Serial.println("Failed to reconnect.");
+      indicateWiFiStatus(true);
     }
   }
 }
 
-// ---- Weather Update Function ----
 void updateWeather() {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     String url = "http://api.openweathermap.org/data/2.5/weather?q=" 
-                 + String(city) + "," + String(countryCode)
-                 + "&appid=" + String(weatherApiKey)
+                 + city + "," + countryCode
+                 + "&appid=" + weatherApiKey
                  + "&units=metric";
-    Serial.println("Requesting weather data from:");
-    Serial.println(url);
 
-    http.begin(url);
-    int httpCode = http.GET();
-    if (httpCode > 0 && httpCode == HTTP_CODE_OK) {
-      String payload = http.getString();
-      Serial.println("Received payload:");
-      Serial.println(payload);
+    int retries = 3;
+    int delayMs = 1000;
 
-      DynamicJsonDocument doc(2048);
-      DeserializationError error = deserializeJson(doc, payload);
-      if (!error) {
-        const char* descCond = doc["weather"][0]["description"];
-        String descStr = String(descCond);
-        descStr.toLowerCase();
-        Serial.print("Weather description: ");
-        Serial.println(descStr);
+    while (retries > 0) {
+      http.begin(url);
+      int httpCode = http.GET();
+      if (httpCode == HTTP_CODE_OK) {
+        String payload = http.getString();
+        DynamicJsonDocument doc(2048);
+        DeserializationError error = deserializeJson(doc, payload);
+        if (!error) {
+          const char* descCond = doc["weather"][0]["description"];
+          String descStr = String(descCond);
+          descStr.toLowerCase();
 
-        String newState = "";
-        if (descStr == "clear sky") {
-          newState = "clear";
-        }
-        else if (descStr == "few clouds" || descStr == "scattered clouds") {
-          newState = "clear+cloud";
-        }
-        else if (descStr == "broken clouds" || descStr == "overcast clouds" ||
-                 descStr == "mist" || descStr == "haze" || descStr == "fog") {
-          newState = "cloud";
-        }
-        else {
-          newState = "thunder";
-        }
-        
-        Serial.print("New state: ");
-        Serial.println(newState);
-        
-        if (newState != currentState) {
-          Serial.println("Weather state changed, updating LED display.");
-          currentState = newState;
-          clearLEDs();
-          updateLEDs();
-          if (currentState == "thunder") {
-            lastThunder = millis();
+          String newState = "";
+          if (descStr == "clear sky") newState = "clear";
+          else if (descStr == "few clouds" || descStr == "scattered clouds") newState = "clear+cloud";
+          else if (descStr == "broken clouds" || descStr == "overcast clouds" ||
+                   descStr == "mist" || descStr == "haze" || descStr == "fog") newState = "cloud";
+          else newState = "thunder";
+
+          if (newState != currentState) {
+            currentState = newState;
+            lastKnownState = newState;
+            isManualOverride = false;
+            isInitialized = true;
+            clearLEDs();
+            indicateMode();
+            updateLEDs();
+            if (currentState == "thunder") lastThunder = millis();
           }
-        }
-        else {
-          Serial.println("Weather state unchanged.");
+          http.end();
+          return;
         }
       }
-      else {
-        Serial.print("JSON Parsing failed: ");
-        Serial.println(error.f_str());
-      }
+      http.end();
+      retries--;
+      delay(delayMs);
+      delayMs *= 2;
     }
-    else {
-      Serial.print("HTTP GET failed: ");
-      Serial.println(http.errorToString(httpCode));
-    }
-    http.end();
+    currentState = lastKnownState;
+  } else {
+    currentState = lastKnownState;
   }
 }
 
-// ---- LED Control Functions ----
 void showSunny() {
   float brightness = random(85, 101) / 100.0;
   uint8_t r = (uint8_t)(255 * brightness);
@@ -234,7 +303,7 @@ void showCloudy() {
 void showLightningCloud() {
   const int flashes = 3;
   for (int i = 0; i < flashes; i++) {
-    for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
+    for (int j = 0; j < NUM_CLOUD_LEDS; j++) { // Fixed loop variable
       cloudStrip.setPixelColor(j, cloudStrip.Color(255, 255, 255));
     }
     cloudStrip.show();
