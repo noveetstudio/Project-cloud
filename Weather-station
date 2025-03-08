@@ -26,6 +26,7 @@ String lastKnownState = "clear";
 bool isManualOverride = false;
 bool isInitialized = false;
 const unsigned long updateInterval = 10 * 60 * 1000;
+bool lightningStyle = false; // Toggle between all-flash and sequential-flash
 
 WiFiManagerParameter custom_api_key("api", "Weather API Key", "2daec8d0525b0e600598bb69cfdec452", 40);
 WiFiManagerParameter custom_city("city", "City", "Seville", 20);
@@ -43,7 +44,6 @@ void showCloudy();
 void showLightningCloud();
 void indicateMode();
 void indicateWiFiStatus(bool connected);
-void indicateTouch();
 
 void setup() {
   pinMode(TOUCH_PIN, INPUT);
@@ -112,14 +112,13 @@ void loop() {
     if (touchState == HIGH && lastTouchState == LOW && !touchTimingStarted) {
       touchStartTime = millis();
       touchTimingStarted = true;
-      indicateTouch(); // Flash to confirm touch detection
     }
     if (touchState == LOW && lastTouchState == HIGH) {
       unsigned long touchDuration = millis() - touchStartTime;
-      if (touchDuration < 1000) {
+      if (touchDuration < 1000) { // < 1s: Toggle LEDs
         ledsEnabled = !ledsEnabled;
         if (!ledsEnabled) clearLEDs();
-      } else if (touchDuration < 3000) {
+      } else if (touchDuration < 5000) { // 1-5s: Cycle manual states
         isManualOverride = true;
         isInitialized = true;
         if (currentState == "clear") currentState = "clear+cloud";
@@ -129,12 +128,12 @@ void loop() {
         lastKnownState = currentState;
         clearLEDs();
         indicateMode();
-      } else if (touchDuration < 5000) {
+      } else if (touchDuration < 10000) { // 5-10s: Switch to API mode
         isManualOverride = false; // Explicitly clear manual mode
         isInitialized = true;
-        updateWeather(); // Now it will proceed since isManualOverride is false
+        updateWeather(); // Switch to API mode
         lastUpdate = millis();
-      } else if (touchDuration > 5000 && touchDuration < 6000) {
+      } else { // > 10s: Reset WiFi settings
         WiFiManager wm;
         wm.resetSettings();
         ESP.restart();
@@ -164,15 +163,6 @@ void indicateWiFiStatus(bool connected) {
     clearLEDs();
     delay(500);
   }
-}
-
-void indicateTouch() {
-  for (int i = 0; i < NUM_SUN_LEDS; i++) {
-    sunStrip.setPixelColor(i, sunStrip.Color(0, 0, 255)); // Blue flash
-  }
-  sunStrip.show();
-  delay(100);
-  clearLEDs();
 }
 
 void updateLEDs() {
@@ -214,7 +204,7 @@ void indicateMode() {
     clearLEDs();
   } else {
     for (int i = 0; i < NUM_CLOUD_LEDS; i++) {
-      cloudStrip.setPixelColor(i, cloudStrip.Color(0, 255, 0));
+      cloudStrip.setPixelColor(i, sunStrip.Color(0, 255, 0));
     }
     cloudStrip.show();
     delay(200);
@@ -318,18 +308,38 @@ void showCloudy() {
 void showLightningCloud() {
   const int flashes = 3;
   for (int i = 0; i < flashes; i++) {
-    for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
-      cloudStrip.setPixelColor(j, cloudStrip.Color(255, 255, 255));
+    if (lightningStyle) {
+      // Sequential flash (LED 1 to 5)
+      for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
+        cloudStrip.setPixelColor(j, cloudStrip.Color(255, 255, 255));
+        cloudStrip.show();
+        delay(50); // Short delay for movement effect
+        cloudStrip.setPixelColor(j, 0); // Turn off as we move to next
+        if (j > 0) cloudStrip.setPixelColor(j - 1, cloudStrip.Color(255, 255, 255)); // Keep previous on briefly
+      }
+      cloudStrip.show();
+      delay(random(50, 150));
+      for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
+        cloudStrip.setPixelColor(j, 0);
+      }
+      cloudStrip.show();
+      delay(random(50, 150));
+    } else {
+      // All LEDs flash at once (original behavior)
+      for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
+        cloudStrip.setPixelColor(j, cloudStrip.Color(255, 255, 255));
+      }
+      cloudStrip.show();
+      delay(random(50, 150));
+      for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
+        cloudStrip.setPixelColor(j, 0);
+      }
+      cloudStrip.show();
+      delay(random(50, 150));
     }
-    cloudStrip.show();
-    delay(random(50, 150));
-    for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
-      cloudStrip.setPixelColor(j, 0);
-    }
-    cloudStrip.show();
-    delay(random(50, 150));
   }
   showCloudy();
+  lightningStyle = !lightningStyle; // Toggle style for next time
 }
 
 void clearLEDs() {
