@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <Adafruit_NeoPixel.h>
 #include <WiFiManager.h>
+#include <Preferences.h>
 
 #define SUN_PIN      2  // GPIO 2 (A2)
 #define NUM_SUN_LEDS 4
@@ -13,6 +14,7 @@ Adafruit_NeoPixel sunStrip(NUM_SUN_LEDS, SUN_PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel cloudStrip(NUM_CLOUD_LEDS, CLOUD_PIN, NEO_GRB + NEO_KHZ800);
 
 #define TOUCH_PIN    3  // GPIO 3 (A3)
+
 bool ledsEnabled = true;
 bool lastTouchState = LOW;
 unsigned long touchStartTime = 0;
@@ -34,6 +36,16 @@ WiFiManagerParameter custom_country("country", "Country Code", "ES", 3);
 String weatherApiKey;
 String city;
 String countryCode;
+
+Preferences preferences;
+
+void saveConfigCallback() {
+  preferences.begin("weatherled", false);
+  preferences.putString("city", custom_city.getValue());
+  preferences.putString("countryCode", custom_country.getValue());
+  preferences.putString("apiKey", custom_api_key.getValue());
+  preferences.end();
+}
 
 void updateWeather();
 void updateLEDs();
@@ -69,6 +81,19 @@ void setup() {
   wm.addParameter(&custom_city);
   wm.addParameter(&custom_country);
 
+  // Load saved preferences
+  preferences.begin("weatherled", true);
+  String savedCity = preferences.getString("city", "Seville");
+  String savedCountry = preferences.getString("countryCode", "ES");
+  String savedApiKey = preferences.getString("apiKey", "2daec8d0525b0e600598bb69cfdec452");
+  preferences.end();
+
+  custom_city.setValue(savedCity.c_str(), 20);
+  custom_country.setValue(savedCountry.c_str(), 3);
+  custom_api_key.setValue(savedApiKey.c_str(), 40);
+
+  wm.setSaveConfigCallback(saveConfigCallback);
+
   bool connected = wm.autoConnect("WeatherLED_AP", NULL);
   indicateWiFiStatus(connected);
 
@@ -91,9 +116,8 @@ void setup() {
   city = custom_city.getValue();
   countryCode = custom_country.getValue();
 
-  // Force initial state
   isInitialized = true;
-  updateWeather(); // Trigger immediate weather update
+  updateWeather();
   delay(100);
   lastTouchState = digitalRead(TOUCH_PIN);
   startupTime = millis();
@@ -107,7 +131,7 @@ void loop() {
     lastUpdate = millis();
   }
 
-  if (millis() - startupTime > 5000) { // Allow touch after 5 seconds
+  if (millis() - startupTime > 5000) {
     bool touchState = digitalRead(TOUCH_PIN);
     if (touchState == HIGH && lastTouchState == LOW && !touchTimingStarted) {
       touchStartTime = millis();
@@ -115,10 +139,10 @@ void loop() {
     }
     if (touchState == LOW && lastTouchState == HIGH) {
       unsigned long touchDuration = millis() - touchStartTime;
-      if (touchDuration < 1000) { // < 1s: Toggle LEDs
+      if (touchDuration < 1000) {
         ledsEnabled = !ledsEnabled;
         if (!ledsEnabled) clearLEDs();
-      } else if (touchDuration < 5000) { // 1-5s: Cycle manual states
+      } else if (touchDuration < 5000) {
         isManualOverride = true;
         isInitialized = true;
         if (currentState == "clear") currentState = "clear+cloud";
@@ -128,12 +152,12 @@ void loop() {
         lastKnownState = currentState;
         clearLEDs();
         indicateMode();
-      } else if (touchDuration < 10000) { // 5-10s: Switch to API mode
-        isManualOverride = false; // Explicitly clear manual mode
+      } else if (touchDuration < 10000) {
+        isManualOverride = false;
         isInitialized = true;
-        updateWeather(); // Switch to API mode
+        updateWeather();
         lastUpdate = millis();
-      } else { // > 10s: Reset WiFi settings
+      } else {
         WiFiManager wm;
         wm.resetSettings();
         ESP.restart();
@@ -143,7 +167,15 @@ void loop() {
     lastTouchState = touchState;
   }
 
-  if (ledsEnabled && isInitialized) {
+  // Enforce LED off state when disabled
+  if (!ledsEnabled) {
+    sunStrip.setBrightness(0); // Disable NeoPixel output
+    cloudStrip.setBrightness(0);
+    clearLEDs(); // Force LEDs off
+    delay(10); // Short delay to ensure stability
+  } else if (isInitialized) {
+    sunStrip.setBrightness(255); // Restore brightness when enabled
+    cloudStrip.setBrightness(255);
     updateLEDs();
   }
   delay(100);
@@ -231,7 +263,7 @@ void ensureWiFiConnected() {
 }
 
 void updateWeather() {
-  if (WiFi.status() == WL_CONNECTED && !isManualOverride) { // Only update if not in manual mode
+  if (WiFi.status() == WL_CONNECTED && !isManualOverride) {
     HTTPClient http;
     String url = "http://api.openweathermap.org/data/2.5/weather?q=" 
                  + city + "," + countryCode
@@ -282,7 +314,7 @@ void updateWeather() {
     }
     currentState = lastKnownState;
   } else {
-    currentState = lastKnownState; // Preserve last state in manual mode or no WiFi
+    currentState = lastKnownState;
   }
 }
 
@@ -313,9 +345,9 @@ void showLightningCloud() {
       for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
         cloudStrip.setPixelColor(j, cloudStrip.Color(255, 255, 255));
         cloudStrip.show();
-        delay(50); // Short delay for movement effect
-        cloudStrip.setPixelColor(j, 0); // Turn off as we move to next
-        if (j > 0) cloudStrip.setPixelColor(j - 1, cloudStrip.Color(255, 255, 255)); // Keep previous on briefly
+        delay(50);
+        cloudStrip.setPixelColor(j, 0);
+        if (j > 0) cloudStrip.setPixelColor(j - 1, cloudStrip.Color(255, 255, 255));
       }
       cloudStrip.show();
       delay(random(50, 150));
@@ -325,7 +357,7 @@ void showLightningCloud() {
       cloudStrip.show();
       delay(random(50, 150));
     } else {
-      // All LEDs flash at once (original behavior)
+      // All LEDs flash at once
       for (int j = 0; j < NUM_CLOUD_LEDS; j++) {
         cloudStrip.setPixelColor(j, cloudStrip.Color(255, 255, 255));
       }
@@ -339,7 +371,7 @@ void showLightningCloud() {
     }
   }
   showCloudy();
-  lightningStyle = !lightningStyle; // Toggle style for next time
+  lightningStyle = !lightningStyle;
 }
 
 void clearLEDs() {
